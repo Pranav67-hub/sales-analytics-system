@@ -28,3 +28,5 @@ After running, confirm the console prints:
 Total records parsed: 80
 Invalid records removed: 10
 Valid records after cleaning: 70
+```
+###Module 3 Q3 functions are in utils/data_processor.py
