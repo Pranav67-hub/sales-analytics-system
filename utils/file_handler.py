@@ -1,136 +1,211 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-EXPECTED_FIELDS = [
-    "TransactionID", "Date", "ProductID", "ProductName",
-    "Quantity", "UnitPrice", "CustomerID", "Region"
-]
 
-@dataclass(frozen=True)
-class SalesRecord:
-    transaction_id: str
-    date: str
-    product_id: str
-    product_name: str
-    quantity: int
-    unit_price: float
-    customer_id: str
-    region: str
+def read_sales_data(filename: str) -> List[str]:
+    """
+    Reads sales data from file handling encoding issues
+    Returns: list of raw lines (strings)
+    Requirements:
+    - Use 'with' statement
+    - Handle different encodings (try 'utf-8', 'latin-1', 'cp1252')
+    - Handle FileNotFoundError with appropriate error message
+    - Skip the header row
+    - Remove empty lines
+    """
+    encodings = ["utf-8", "latin-1", "cp1252"]
 
-    @property
-    def revenue(self) -> float:
-        return self.quantity * self.unit_price
+    try:
+        for enc in encodings:
+            try:
+                with open(filename, "r", encoding=enc) as f:
+                    lines = f.read().splitlines()
+                break
+            except UnicodeDecodeError:
+                lines = None
+                continue
+
+        if lines is None:
+            # last resort: replace bad chars
+            with open(filename, "r", encoding="latin-1", errors="replace") as f:
+                lines = f.read().splitlines()
+
+    except FileNotFoundError:
+        print(f"Error: File not found -> {filename}")
+        return []
+
+    # remove empty lines
+    lines = [ln.strip() for ln in lines if ln and ln.strip()]
+
+    # skip header row if present
+    if lines and lines[0].startswith("TransactionID"):
+        lines = lines[1:]
+
+    return lines
 
 
-def _decode_bytes(raw: bytes) -> str:
-    for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
-        try:
-            return raw.decode(enc)
-        except UnicodeDecodeError:
+def parse_transactions(raw_lines: List[str]) -> List[Dict]:
+    """
+    Parses raw lines into clean list of dictionaries
+    Returns: list of dictionaries with keys:
+    ['TransactionID','Date','ProductID','ProductName','Quantity','UnitPrice','CustomerID','Region']
+
+    Requirements:
+    - Split by pipe delimiter '|'
+    - Handle commas within ProductName (remove or replace)
+    - Remove commas from numeric fields and convert to proper types
+    - Convert Quantity to int
+    - Convert UnitPrice to float
+    - Skip rows with incorrect number of fields
+    """
+    out: List[Dict] = []
+    keys = ["TransactionID", "Date", "ProductID", "ProductName", "Quantity", "UnitPrice", "CustomerID", "Region"]
+
+    for line in raw_lines:
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) != 8:
             continue
-    return raw.decode("latin-1", errors="replace")
+
+        txid, dt, pid, pname, qty, price, cid, region = parts
+
+        # clean product name commas
+        pname = pname.replace(",", "")
+
+        # remove commas from numbers (e.g., 1,500 -> 1500)
+        qty_clean = qty.replace(",", "")
+        price_clean = price.replace(",", "")
+
+        try:
+            qty_int = int(qty_clean)
+            price_float = float(price_clean)
+        except ValueError:
+            continue
+
+        rec = {
+            "TransactionID": txid,
+            "Date": dt,
+            "ProductID": pid,
+            "ProductName": pname,
+            "Quantity": qty_int,
+            "UnitPrice": price_float,
+            "CustomerID": cid,
+            "Region": region,
+        }
+        out.append(rec)
+
+    return out
 
 
-def _clean_number(s: str) -> str:
-    return s.replace(",", "").strip()
+def validate_and_filter(
+    transactions: List[Dict],
+    region: Optional[str] = None,
+    min_amount: Optional[float] = None,
+    max_amount: Optional[float] = None,
+) -> Tuple[List[Dict], int, Dict]:
+    """
+    Validates transactions and applies optional filters
 
+    Returns: (valid_transactions, invalid_count, filter_summary)
 
-def _clean_product_name(s: str) -> str:
-    return s.replace(",", "").strip()
+    Validation Rules:
+    - Quantity must be > 0
+    - UnitPrice must be > 0
+    - All required fields must be present
+    - TransactionID must start with 'T'
+    - ProductID must start with 'P'
+    - CustomerID must start with 'C'
 
+    Filter Display:
+    - Print available regions to user before filtering
+    - Print transaction amount range (min/max) to user
+    - Show count of records after each filter applied
+    """
+    summary = {
+        "total_input": len(transactions),
+        "invalid": 0,
+        "filtered_by_region": 0,
+        "filtered_by_amount": 0,
+        "final_count": 0,
+    }
 
-def _parse_pipe_row(line: str) -> Optional[Dict[str, str]]:
-    line = line.strip()
-    if not line:
-        return None
+    required = ["TransactionID", "Date", "ProductID", "ProductName", "Quantity", "UnitPrice", "CustomerID", "Region"]
 
-    parts = line.split("|")
-
-    # Skip header row if present
-    if parts and parts[0].strip() == "TransactionID":
-        return None
-
-    # If extra fields exist, assume ProductName may contain pipes.
-    # Map: [0]=TID [1]=Date [2]=ProdID [3..-5]=ProductName [-4]=Qty [-3]=UnitPrice [-2]=CustomerID [-1]=Region
-    if len(parts) > 8:
-        tid = parts[0]
-        dt = parts[1]
-        pid = parts[2]
-        product_name = "|".join(parts[3:-4])
-        qty = parts[-4]
-        price = parts[-3]
-        cid = parts[-2]
-        region = parts[-1]
-        parts = [tid, dt, pid, product_name, qty, price, cid, region]
-
-    # If fewer than 8 fields, pad (will fail validation later)
-    if len(parts) < 8:
-        parts = parts + ([""] * (8 - len(parts)))
-
-    row = dict(zip(EXPECTED_FIELDS, parts))
-    return {k: (v.strip() if isinstance(v, str) else v) for k, v in row.items()}
-
-
-def load_and_clean_sales(path: str | Path) -> Tuple[List[SalesRecord], Dict[str, int]]:
-    raw = Path(path).read_bytes()
-    text = _decode_bytes(raw)
-    lines = text.splitlines()
-
-    parsed_rows: List[Dict[str, str]] = []
-    for line in lines:
-        row = _parse_pipe_row(line)
-        if row is not None:
-            parsed_rows.append(row)
-
-    total_parsed = len(parsed_rows)
-    valid: List[SalesRecord] = []
+    valid: List[Dict] = []
     invalid = 0
 
-    for r in parsed_rows:
+    for t in transactions:
         try:
-            tid = r["TransactionID"].strip()
-            if not tid.startswith("T"):
-                raise ValueError("TransactionID must start with T")
+            # required fields present and non-empty
+            for k in required:
+                if k not in t or t[k] in (None, ""):
+                    raise ValueError("missing field")
 
-            customer_id = r["CustomerID"].strip()
-            region = r["Region"].strip()
-            if not customer_id or not region:
-                raise ValueError("Missing CustomerID or Region")
+            # type checks (Quantity int, UnitPrice float)
+            qty = int(t["Quantity"])
+            price = float(t["UnitPrice"])
 
-            qty = int(_clean_number(r["Quantity"]))
-            price = float(_clean_number(r["UnitPrice"]))
+            if qty <= 0 or price <= 0:
+                raise ValueError("qty/price invalid")
 
-            if qty <= 0:
-                raise ValueError("Quantity <= 0")
-            if price <= 0:
-                raise ValueError("UnitPrice <= 0")
+            if not str(t["TransactionID"]).startswith("T"):
+                raise ValueError("bad transaction id")
+            if not str(t["ProductID"]).startswith("P"):
+                raise ValueError("bad product id")
+            if not str(t["CustomerID"]).startswith("C"):
+                raise ValueError("bad customer id")
 
-            rec = SalesRecord(
-                transaction_id=tid,
-                date=r["Date"].strip(),
-                product_id=r["ProductID"].strip(),
-                product_name=_clean_product_name(r["ProductName"]),
-                quantity=qty,
-                unit_price=price,
-                customer_id=customer_id,
-                region=region,
-            )
-            valid.append(rec)
+            # attach computed amount for filtering convenience
+            t2 = dict(t)
+            t2["_amount"] = qty * price
+            valid.append(t2)
+
         except Exception:
             invalid += 1
 
-    # REQUIRED printout
-    print(f"Total records parsed: {total_parsed}")
-    print(f"Invalid records removed: {invalid}")
-    print(f"Valid records after cleaning: {len(valid)}")
+    summary["invalid"] = invalid
 
-    stats = {
-        "total_parsed": total_parsed,
-        "invalid_removed": invalid,
-        "valid_after_cleaning": len(valid),
-    }
-    return valid, stats
+    # print regions + amount range BEFORE filtering
+    regions = sorted({v["Region"] for v in valid})
+    print(f"Available regions: {regions}")
 
+    if valid:
+        amounts = [v["_amount"] for v in valid]
+        print(f"Transaction amount range: {min(amounts):.2f} - {max(amounts):.2f}")
+    else:
+        print("Transaction amount range: 0.00 - 0.00")
+
+    current = valid
+    print(f"Records after validation: {len(current)}")
+
+    # region filter
+    if region is not None:
+        before = len(current)
+        current = [v for v in current if v["Region"] == region]
+        removed = before - len(current)
+        summary["filtered_by_region"] = removed
+        print(f"Records after region filter ({region}): {len(current)}")
+
+    # amount filter
+    if min_amount is not None or max_amount is not None:
+        before = len(current)
+
+        def ok(v: Dict) -> bool:
+            amt = v["_amount"]
+            if min_amount is not None and amt < float(min_amount):
+                return False
+            if max_amount is not None and amt > float(max_amount):
+                return False
+            return True
+
+        current = [v for v in current if ok(v)]
+        removed = before - len(current)
+        summary["filtered_by_amount"] = removed
+        print(f"Records after amount filter: {len(current)}")
+
+    # remove helper field before returning
+    for v in current:
+        v.pop("_amount", None)
+
+    summary["final_count"] = len(current)
+    return current, invalid, summary
