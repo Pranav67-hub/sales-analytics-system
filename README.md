@@ -22,3 +22,9 @@ From the repository root:
 
 ```bash
 python main.py --input data/sales_data.txt --report reports/report.json
+
+## Quick check
+After running, confirm the console prints:
+Total records parsed: 80
+Invalid records removed: 10
+Valid records after cleaning: 70
